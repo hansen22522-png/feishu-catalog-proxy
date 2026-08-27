@@ -6,7 +6,7 @@
 import os
 import time
 import requests
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -55,11 +55,15 @@ FIELD_MAP = {
     '备注': 'remark',
     '图片URL': 'img',
 }
+REVERSE_FIELD_MAP = {v: k for k, v in FIELD_MAP.items()}
+# 超链接类型的列，写入时需要用 {"text": "", "link": ""} 格式
+# 如果你的图片URL列改成了"文本"类型，把这里改成空列表 []
+LINK_FIELDS = ['图片URL']
 
 def normalize_record(record):
     """把飞书记录转成统一格式"""
     fields = record.get('fields', {})
-    item = {}
+    item = {'record_id': record.get('record_id', '')}
     for cn_name, en_name in FIELD_MAP.items():
         val = fields.get(cn_name, '')
         # 飞书单选/多选字段返回的是 [{"text": "xxx"}] 格式
@@ -78,6 +82,18 @@ def normalize_record(record):
         except (ValueError, TypeError):
             item['cost'] = 0
     return item
+
+def to_feishu_fields(item):
+    """把内部数据格式转成飞书写入格式"""
+    fields = {}
+    for en_name, cn_name in REVERSE_FIELD_MAP.items():
+        if en_name in item and item[en_name] != '' and item[en_name] is not None:
+            val = item[en_name]
+            if cn_name in LINK_FIELDS and isinstance(val, str) and val.startswith('http'):
+                fields[cn_name] = {"text": val, "link": val}
+            else:
+                fields[cn_name] = val
+    return fields
 
 # ========== API 路由 ==========
 @app.route('/api/records')
@@ -133,7 +149,75 @@ def health():
 
 @app.route('/')
 def index():
-    return jsonify({'message': '飞书多维表格代理服务运行中', 'endpoints': ['/api/records', '/api/health']})
+    return jsonify({'message': '飞书多维表格代理服务运行中', 'endpoints': ['GET /api/records', 'POST /api/records', 'PUT /api/records/<id>', 'DELETE /api/records/<id>', '/api/health']})
+
+# ========== 写入接口 ==========
+@app.route('/api/records', methods=['POST'])
+def create_record():
+    """新增一条记录"""
+    if not all([FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_APP_TOKEN, FEISHU_TABLE_ID]):
+        return jsonify({'error': '后端环境变量未配置完整'}), 500
+    body = request.get_json(silent=True) or {}
+    fields = to_feishu_fields(body)
+    if not fields:
+        return jsonify({'error': '没有有效字段'}), 400
+    try:
+        token = get_tenant_token()
+        resp = requests.post(
+            f'https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_TABLE_ID}/records',
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+            json={'fields': fields},
+            timeout=15
+        )
+        data = resp.json()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    if data.get('code') != 0:
+        return jsonify({'error': data.get('msg', '新增失败'), 'code': data.get('code')}), 502
+    return jsonify({'success': True, 'record': normalize_record(data['data']['record'])})
+
+@app.route('/api/records/<record_id>', methods=['PUT'])
+def update_record(record_id):
+    """更新一条记录"""
+    if not all([FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_APP_TOKEN, FEISHU_TABLE_ID]):
+        return jsonify({'error': '后端环境变量未配置完整'}), 500
+    body = request.get_json(silent=True) or {}
+    fields = to_feishu_fields(body)
+    if not fields:
+        return jsonify({'error': '没有有效字段'}), 400
+    try:
+        token = get_tenant_token()
+        resp = requests.put(
+            f'https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_TABLE_ID}/records/{record_id}',
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+            json={'fields': fields},
+            timeout=15
+        )
+        data = resp.json()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    if data.get('code') != 0:
+        return jsonify({'error': data.get('msg', '更新失败'), 'code': data.get('code')}), 502
+    return jsonify({'success': True, 'record': normalize_record(data['data']['record'])})
+
+@app.route('/api/records/<record_id>', methods=['DELETE'])
+def delete_record(record_id):
+    """删除一条记录"""
+    if not all([FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_APP_TOKEN, FEISHU_TABLE_ID]):
+        return jsonify({'error': '后端环境变量未配置完整'}), 500
+    try:
+        token = get_tenant_token()
+        resp = requests.delete(
+            f'https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_TABLE_ID}/records/{record_id}',
+            headers={'Authorization': f'Bearer {token}'},
+            timeout=15
+        )
+        data = resp.json()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    if data.get('code') != 0:
+        return jsonify({'error': data.get('msg', '删除失败'), 'code': data.get('code')}), 502
+    return jsonify({'success': True})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
