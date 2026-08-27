@@ -65,6 +65,9 @@ def normalize_record(record):
         # 飞书单选/多选字段返回的是 [{"text": "xxx"}] 格式
         if isinstance(val, list) and val and isinstance(val[0], dict):
             val = val[0].get('text', val[0].get('name', ''))
+        # 飞书超链接字段返回的是 {"text": "xxx", "link": "xxx"} 格式
+        elif isinstance(val, dict):
+            val = val.get('link', val.get('text', ''))
         item[en_name] = val
     # 确保成本是数字
     if item['cost'] == '' or item['cost'] is None:
